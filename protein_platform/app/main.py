@@ -134,6 +134,9 @@ def get_production_enriched(
             "source_event_id": fact.source_event_id,
             "produced_qty_lb": float(fact.produced_qty_lb),
             "scrap_qty_lb": float(fact.scrap_qty_lb),
+            "event_date": fact.event_ts.date().isoformat(),
+            "event_hour": fact.event_ts.hour,
+
 
             # dim fields (flattened)
             "product_key": prod.product_key,
