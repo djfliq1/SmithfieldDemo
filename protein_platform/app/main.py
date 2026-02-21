@@ -12,7 +12,8 @@ from app.plugins.beef_wms import BeefWmsPlugin
 from app.plugins.pork_erp import PorkErpPlugin
 from app.plugins.poultry_mes import PoultryMesPlugin
 from app.registry import PluginNotFoundError, PluginRegistry
-from app.models import Base, FactProduction
+from app.models import Base, FactProduction, DimProduct
+
 
 
 # --- DB setup ---
@@ -92,4 +93,55 @@ def get_production(
             "source_event_id": r.source_event_id,
         }
         for r in rows
+    ]
+
+
+@app.get("/production/enriched")
+def get_production_enriched(
+    session: Session = Depends(get_session),
+    plant_code: str | None = None,
+    source_system: str | None = None,
+    protein_type: str | None = None,
+    limit: int = 100,
+):
+    if limit < 1:
+        limit = 1
+    if limit > 500:
+        limit = 500
+
+    q = (
+        session.query(FactProduction, DimProduct)
+        .join(DimProduct, FactProduction.product_key == DimProduct.product_key)
+    )
+
+    if plant_code:
+        q = q.filter(FactProduction.plant_code == plant_code)
+
+    if source_system:
+        q = q.filter(FactProduction.source_system == source_system)
+
+    if protein_type:
+        q = q.filter(DimProduct.protein_type == protein_type)
+
+    rows = q.order_by(FactProduction.event_ts.desc()).limit(limit).all()
+
+    return [
+        {
+            "event_ts": fact.event_ts.isoformat(),
+            "plant_code": fact.plant_code,
+            "source_system": fact.source_system,
+            "source_event_id": fact.source_event_id,
+            "produced_qty_lb": float(fact.produced_qty_lb),
+            "scrap_qty_lb": float(fact.scrap_qty_lb),
+            "product": {
+                "product_key": prod.product_key,
+                "canonical_sku": prod.canonical_sku,
+                "product_name": prod.product_name,
+                "protein_type": prod.protein_type,
+                "cut_type": prod.cut_type,
+                "uom": prod.uom,
+                "is_active": prod.is_active,
+            },
+        }
+        for fact, prod in rows
     ]
