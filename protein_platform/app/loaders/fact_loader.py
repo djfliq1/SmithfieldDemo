@@ -1,23 +1,17 @@
 from sqlalchemy.orm import Session
-from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from app.contracts import CanonicalProductionEvent
 from app.models import FactProduction
 
 
+# Idempotency is enforced at the database layer via UNIQUE(source_system, source_event_id).
+# This prevents race conditions and guarantees correctness even under concurrent ingestion.
 class FactProductionLoader:
     def __init__(self, session: Session):
         self._session = session
 
     def insert_if_new(self, e: CanonicalProductionEvent) -> bool:
-        stmt = select(FactProduction).where(
-            FactProduction.source_system == e.source_system,
-            FactProduction.source_event_id == e.source_event_id,
-        )
-        existing = self._session.execute(stmt).scalars().first()
-        if existing is not None:
-            return False
-
         row = FactProduction(
             event_ts=e.event_ts,
             plant_code=e.plant_code,
@@ -28,5 +22,9 @@ class FactProductionLoader:
             source_event_id=e.source_event_id,
         )
         self._session.add(row)
-        self._session.commit()
-        return True
+        try:
+            self._session.commit()
+            return True
+        except IntegrityError:
+            self._session.rollback()
+            return False

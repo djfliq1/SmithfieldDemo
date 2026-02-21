@@ -90,7 +90,7 @@ class FactProduction(Base):
     product: Mapped["DimProduct"] = relationship(back_populates="productions")
 
     __table_args__ = (
-        UniqueConstraint("source_system", "source_event_id", name="uq_fact_source_event"),
+        UniqueConstraint("source_system", "source_event_id", name="uq_fact_src_event"),
         Index("ix_fact_event_ts", "event_ts"),
         Index("ix_fact_plant", "plant_code"),
     )
