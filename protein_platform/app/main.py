@@ -127,21 +127,23 @@ def get_production_enriched(
 
     return [
         {
+            # fact fields
             "event_ts": fact.event_ts.isoformat(),
             "plant_code": fact.plant_code,
             "source_system": fact.source_system,
             "source_event_id": fact.source_event_id,
             "produced_qty_lb": float(fact.produced_qty_lb),
             "scrap_qty_lb": float(fact.scrap_qty_lb),
-            "product": {
-                "product_key": prod.product_key,
-                "canonical_sku": prod.canonical_sku,
-                "product_name": prod.product_name,
-                "protein_type": prod.protein_type,
-                "cut_type": prod.cut_type,
-                "uom": prod.uom,
-                "is_active": prod.is_active,
-            },
+
+            # dim fields (flattened)
+            "product_key": prod.product_key,
+            "canonical_sku": prod.canonical_sku,
+            "product_name": prod.product_name,
+            "protein_type": prod.protein_type,
+            "cut_type": prod.cut_type,
+            "product_uom": prod.uom,
+            "product_is_active": prod.is_active,
         }
         for fact, prod in rows
     ]
+
