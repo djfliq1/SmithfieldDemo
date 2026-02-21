@@ -12,6 +12,8 @@ from app.plugins.beef_wms import BeefWmsPlugin
 from app.plugins.pork_erp import PorkErpPlugin
 from app.plugins.poultry_mes import PoultryMesPlugin
 from app.registry import PluginNotFoundError, PluginRegistry
+from app.models import Base, FactProduction
+
 
 # --- DB setup ---
 _config = load_db_config()
@@ -54,3 +56,40 @@ def ingest_production(payload: dict, session: Session = Depends(get_session)):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/production")
+def get_production(
+    session: Session = Depends(get_session),
+    plant_code: str | None = None,
+    source_system: str | None = None,
+    limit: int = 100,
+):
+    # guardrails
+    if limit < 1:
+        limit = 1
+    if limit > 500:
+        limit = 500
+
+    query = session.query(FactProduction)
+
+    if plant_code:
+        query = query.filter(FactProduction.plant_code == plant_code)
+
+    if source_system:
+        query = query.filter(FactProduction.source_system == source_system)
+
+    rows = query.order_by(FactProduction.event_ts.desc()).limit(limit).all()
+
+    return [
+        {
+            "event_ts": r.event_ts.isoformat(),
+            "plant_code": r.plant_code,
+            "product_key": r.product_key,
+            "produced_qty_lb": float(r.produced_qty_lb),
+            "scrap_qty_lb": float(r.scrap_qty_lb),
+            "source_system": r.source_system,
+            "source_event_id": r.source_event_id,
+        }
+        for r in rows
+    ]
