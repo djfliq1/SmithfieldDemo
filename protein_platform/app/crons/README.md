@@ -4,10 +4,6 @@ Purpose
  - Hold small, idempotent scripts and Render cron definitions that perform
    scheduled maintenance or data-seeding tasks for the Protein Platform.
 
-Current contents
- - This directory is currently empty. Add scripts here as needed (make them
-   executable with a shebang and keep them idempotent).
-
 Recommended scripts & examples
  - seed_daily.sh — run periodic seeding/upserts. Two safe approaches:
    - Call the running service admin endpoint (recommended in Render):
