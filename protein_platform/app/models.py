@@ -141,8 +141,10 @@ class FactPriceByPlant(Base):
             "product_key", "plant_code", "effective_start_dt", name="uq_price_prod_plant_start"
         ),
         Index("ix_price_plant_current", "plant_code", "is_current"),
-        Index("ix_price_product_current", "product_key", "is_current"),
-=======
+        Index("ix_price_product_current", "product_key", "is_current")
+    )
+
+
 class RawProductionEvent(Base):
     __tablename__ = "raw_production_event"
 
