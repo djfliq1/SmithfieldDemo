@@ -10,10 +10,11 @@ from sqlalchemy import (
     Integer,
     Numeric,
     String,
+    Text,
     UniqueConstraint,
     func,
 )
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, Text
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
 class Base(DeclarativeBase):
@@ -116,7 +117,6 @@ class FactProduction(Base):
     )
 
 
-<<<<<<< copilot/create-integration-ingestion-platform
 class FactPriceByPlant(Base):
     __tablename__ = "fact_price_by_plant"
 
@@ -142,8 +142,10 @@ class FactPriceByPlant(Base):
             "product_key", "plant_code", "effective_start_dt", name="uq_price_prod_plant_start"
         ),
         Index("ix_price_plant_current", "plant_code", "is_current"),
-        Index("ix_price_product_current", "product_key", "is_current"),
-=======
+        Index("ix_price_product_current", "product_key", "is_current")
+    )
+
+
 class RawProductionEvent(Base):
     __tablename__ = "raw_production_event"
 
@@ -157,6 +159,5 @@ class RawProductionEvent(Base):
 
     __table_args__ = (
         UniqueConstraint("source_system", "source_event_id", name="uq_raw_src_event"),
-        Index("ix_raw_received_at", "received_at"),
->>>>>>> main
+        Index("ix_raw_received_at", "received_at")
     )
