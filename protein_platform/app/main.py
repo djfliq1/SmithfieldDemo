@@ -7,17 +7,16 @@ from sqlalchemy import text
 from app.contracts import IngestResponse
 from app.db import build_engine, build_session_factory, load_db_config
 from app.mapping_repo import MappingNotFoundError
-from app.models import Base
-from app.models import DimPlant, FactPriceByPlant, DimProduct
+from app.models import Base, FactProduction, DimProduct, DimPlant, FactPriceByPlant
 from app.views import ensure_protein_views
 from app.orchestration import IngestOrchestrator, NormalizationError
 from app.plugins.beef_wms import BeefWmsPlugin
 from app.plugins.pork_erp import PorkErpPlugin
 from app.plugins.poultry_mes import PoultryMesPlugin
 from app.registry import PluginNotFoundError, PluginRegistry
-from app.models import Base, FactProduction, DimProduct
-
-
+import os
+from fastapi import Header
+from app import seed as seed_module
 
 # --- DB setup ---
 _config = load_db_config()
@@ -131,6 +130,15 @@ def _query_view(view_name: str, session: Session, where_clause: str = "", params
     res = session.execute(text(sql), params)
     cols = res.keys()
     return [dict(zip(cols, row)) for row in res.fetchall()]
+
+
+@app.post("/admin/seed")
+def admin_seed(x_admin_token: str | None = Header(None)):
+    admin_token = os.environ.get("ADMIN_TOKEN")
+    if not admin_token or x_admin_token != admin_token:
+        raise HTTPException(status_code=401, detail="unauthorized")
+    counts = seed_module.run_seed(_engine)
+    return {"status": "ok", "inserted": counts}
 
 
 @app.get("/vw/production/pork")
