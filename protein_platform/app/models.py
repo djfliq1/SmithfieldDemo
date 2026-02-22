@@ -13,7 +13,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, Text
 
 
 class Base(DeclarativeBase):
@@ -116,6 +116,7 @@ class FactProduction(Base):
     )
 
 
+<<<<<<< copilot/create-integration-ingestion-platform
 class FactPriceByPlant(Base):
     __tablename__ = "fact_price_by_plant"
 
@@ -142,4 +143,20 @@ class FactPriceByPlant(Base):
         ),
         Index("ix_price_plant_current", "plant_code", "is_current"),
         Index("ix_price_product_current", "product_key", "is_current"),
+=======
+class RawProductionEvent(Base):
+    __tablename__ = "raw_production_event"
+
+    raw_key: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    source_system: Mapped[str] = mapped_column(String(50), nullable=False)
+    source_event_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    event_time: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    plant_code: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    payload_json: Mapped[str] = mapped_column(Text, nullable=False)
+    received_at: Mapped[datetime] = mapped_column(DateTime, default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("source_system", "source_event_id", name="uq_raw_src_event"),
+        Index("ix_raw_received_at", "received_at"),
+>>>>>>> main
     )
