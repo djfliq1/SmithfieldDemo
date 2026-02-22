@@ -116,7 +116,6 @@ class FactProduction(Base):
     )
 
 
-<<<<<<< copilot/create-integration-ingestion-platform
 class FactPriceByPlant(Base):
     __tablename__ = "fact_price_by_plant"
 
