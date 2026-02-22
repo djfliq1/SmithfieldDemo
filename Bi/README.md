@@ -1,385 +1,214 @@
-Smithfield Demo – Enterprise BI Implementation Strategy
-Overview
 
-This demo simulates a Smithfield-style protein production data platform.
+# Smithfield Demo — Enterprise BI Implementation Strategy
 
-It is not a dashboard-first project.
+## Overview
 
-It is a data integrity-first architecture with BI layered on top.
+This repository simulates a Smithfield-style protein production data platform focused on data integrity first, with a thin BI layer (PowerBI) layered on top. The backend implements enterprise-ready patterns so analytics can trust the source of truth.
 
-The goal was to demonstrate how I would design, scale, and operationalize a production-grade analytics environment for a multi-plant protein enterprise.
+## Table of Contents
 
-The BI layer exists because the backend is trustworthy.
+- [Design Philosophy](#design-philosophy)
+- [Backend Architecture Summary](#backend-architecture-summary)
+- [Enterprise Modeling Decisions](#enterprise-modeling-decisions)
+    - [Canonical SKU Registry](#canonical-sku-registry)
+    - [Dimensional Model (Star Schema)](#dimensional-model-star-schema)
+    - [SCD Type 2 Pricing](#scd-type-2-pricing)
+    - [Idempotent ETL](#idempotent-etl)
+- [PowerBI Implementation Strategy](#powerbi-implementation-strategy)
+- [Scaling Considerations](#scaling-considerations)
+- [Failure Scenarios & Operational Handling](#failure-scenarios--operational-handling)
+- [System Flow Diagram](#system-flow-diagram)
+- [Why This Approach](#why-this-approach)
+- [If Expanded to Production](#if-expanded-to-production)
 
-1. Design Philosophy
+## Design Philosophy
 
-When implementing BI in an enterprise protein environment, I prioritize:
+- Prioritize data reliability over visualization aesthetics
+- Dimensional consistency across plants
+- Idempotent ingestion and historical accuracy of pricing
+- Extensibility without schema redesign
+- Clear separation of operational and analytical layers
 
-Data reliability over visualization aesthetics
+This backend-first approach makes the BI layer simple: PowerBI reads a trustworthy star schema.
 
-Dimensional consistency across plants
+## Backend Architecture Summary
 
-Idempotent ingestion
+**Technology stack**
 
-Historical accuracy of pricing
+- FastAPI — API layer
+- SQLAlchemy 2.0 — ORM
+- PostgreSQL — primary datastore (hosted on Render in the demo)
+- Render Cron Jobs — automated ingestion
+- Public Google Drive — external source simulation
+- PowerBI — analytics consumer
 
-Extensibility without schema redesign
+**Example Postgres connection (PowerBI / psql)**
 
-Clear separation of operational and analytical layers
+```bash
+# Connection string example
+export DATABASE_URL="postgresql://<user>:<pass>@<host>:5432/<db>"
 
-This demo backend was designed first to behave like an enterprise system.
+# Quick psql example
+psql "$DATABASE_URL"
+```
 
-PowerBI simply consumes it.
+## Enterprise Modeling Decisions
 
-2. Backend Architecture Summary
-Technology Stack
+### Canonical SKU Registry
 
-FastAPI (API layer)
+Real enterprises have multiple ERPs, plant-specific SKUs, and historical product drift. We include:
 
-SQLAlchemy 2.0 (ORM)
+- `dim_product`
+- `map_product_source_to_canonical`
 
-PostgreSQL (Render)
+Every external SKU resolves to a canonical `product_key` to ensure consistent cross-plant reporting and aggregation.
 
-Render Cron Jobs (automated ingestion)
+### Dimensional Model (Star Schema)
 
-Public Google Drive (external source simulation)
+- Dimensions: `dim_product`, `dim_plant`, (create `dim_date` in BI)
+- Facts: `fact_production`, `fact_price_by_plant`
 
-PowerBI (analytics consumer)
+Star schemas scale well for facts and keep dimensional change logic separate from analytics.
 
-The system is fully cloud-deployed and production-ready in structure.
+### SCD Type 2 Pricing
 
-3. Enterprise Modeling Decisions
-3.1 Canonical SKU Registry
+Pricing uses columns:
 
-Real protein companies operate with:
+- `effective_start_dt`
+- `effective_end_dt`
+- `is_current`
 
-Multiple ERP systems
+Prices are inserted and previous records are closed out (no overwrites). Example SQL pattern for switching the current price:
 
-Plant-specific SKU naming
+```sql
+-- Close previous current record
+UPDATE fact_price_by_plant
+SET is_current = FALSE,
+        effective_end_dt = '2026-02-22'
+WHERE product_key = 'PRODUCT_X'
+    AND plant_code = 'PLANT_A'
+    AND is_current = TRUE;
 
-Historical product drift
+-- Insert new price row
+INSERT INTO fact_price_by_plant (
+    product_key, plant_code, price, effective_start_dt, effective_end_dt, is_current
+) VALUES (
+    'PRODUCT_X', 'PLANT_A', 123.45, '2026-02-23', NULL, TRUE
+);
+```
 
-To address this, the system includes:
+This preserves history for auditability, trend analysis, and regulatory needs.
 
-dim_product
+### Idempotent ETL
 
-map_product_source_to_canonical
+Files are:
 
-Every external SKU resolves to a canonical product_key.
+- Scraped from Google Drive
+- Downloaded via file ID
+- Hashed (SHA256) and logged in `etl_file_ingestion_state`
+- Skipped if the hash already exists
 
-Why this matters:
+Example bash snippet to hash a file and check existence:
 
-Reporting consistency across plants
+```bash
+sha=$(sha256sum pricing.csv | awk '{print $1}')
 
-Reliable cross-system aggregation
+# Query ingestion state (psql example)
+psql "$DATABASE_URL" -c "SELECT 1 FROM etl_file_ingestion_state WHERE file_hash = '$sha' LIMIT 1;"
+```
 
-Enterprise-ready master data modeling behavior
+If the hash is present, the file is skipped — preventing duplicates and silent drift.
 
-This mimics how real MDM systems behave.
+## PowerBI Implementation Strategy
 
-3.2 Dimensional Model (Star Schema)
+The BI layer is intentionally thin: consume the star schema directly, avoid heavy reshaping in PowerBI.
 
-The schema separates:
+Implementation steps:
 
-Dimensions
+1. Connect PowerBI to Postgres using the connector and import:
+     - `dim_product`
+     - `dim_plant`
+     - `fact_price_by_plant`
+     - `fact_production`
+2. Create `dim_date` table in the database or within PowerBI
+3. Define one-to-many relationships (single direction)
+4. Use DAX measures to resolve price-by-date (price ranges remain inactive relationships)
 
-dim_product
+Example DAX (simplified) to resolve price for a given date context:
 
-dim_plant
+```dax
+PriceAtDate =
+VAR selDate = SELECTEDVALUE(dim_date[date])
+RETURN
+CALCULATE(
+    MAX(fact_price_by_plant[price]),
+    FILTER(
+        fact_price_by_plant,
+        fact_price_by_plant[product_key] = SELECTEDVALUE(dim_product[product_key])
+            && fact_price_by_plant[effective_start_dt] <= selDate
+            && (
+                 fact_price_by_plant[effective_end_dt] >= selDate
+                 || ISBLANK(fact_price_by_plant[effective_end_dt])
+            )
+    )
+)
+```
 
-Facts
+Keep relationships single-direction and let DAX perform range-based lookup logic for correctness.
 
-fact_production
+## Scaling Considerations
 
-fact_price_by_plant
+If scaling to enterprise volume, recommended changes:
 
-Why a star schema?
+- Add indexes on `product_key`, `plant_code`, `effective_start_dt`
+- Partition fact tables by date
+- Introduce connection pooling
+- Adopt dbt for transformations and versioning
+- Move orchestration to Airflow/Prefect
+- Use materialized views for BI-heavy workloads
+- Add row-level security for plant isolation
 
-Facts scale rapidly
+These changes are additive and do not require schema redesign.
 
-Dimensions change slowly
+## Failure Scenarios & Operational Handling
 
-BI engines optimize for this structure
+- Duplicate file upload: handled by hashing and ingestion-state logging (skip logic).
+- File schema change: validation fails, status logged as FAILED, no partial insert.
+- Missing plant/product: auto-create `dim_plant` rows where safe; fail gracefully if canonical mapping cannot resolve.
+- Overlapping price ranges: current ETL closes prior `is_current` before inserting; future enhancement would be a DB constraint enforcing non-overlap.
 
-Relationships remain predictable
+## System Flow Diagram
 
-This ensures scalable performance and clean modeling in PowerBI.
-
-3.3 Slowly Changing Pricing (SCD Type 2 Behavior)
-
-Pricing is modeled using:
-
-effective_start_dt
-
-effective_end_dt
-
-is_current
-
-Prices are never overwritten.
-
-Instead:
-
-Previous price is closed out
-
-New price is inserted
-
-History is preserved
-
-Why this matters:
-
-Accurate price trend analysis
-
-Regulatory traceability
-
-Historical margin analysis
-
-Executive-level auditability
-
-3.4 Idempotent ETL
-
-External pricing files are:
-
-Scraped from Google Drive
-
-Downloaded via file ID
-
-Hashed (SHA256)
-
-Logged in etl_file_ingestion_state
-
-Skipped if already processed
-
-Inserted only if new
-
-This prevents:
-
-Duplicate loads
-
-Manual reprocessing errors
-
-Silent data drift
-
-In enterprise systems, repeatable ingestion is critical.
-
-4. PowerBI Implementation Strategy
-
-The BI layer is intentionally thin.
-
-It does not reshape data.
-
-It consumes the star schema directly.
-
-Implementation Steps
-
-Connect via PostgreSQL connector
-
-Import:
-
-dim_product
-
-dim_plant
-
-fact_price_by_plant
-
-fact_production
-
-Create a dim_date table
-
-Define one-to-many relationships
-
-Use DAX for price range logic
-
-Keep relationships single-direction
-
-Price date relationships are intentionally inactive.
-
-Why?
-
-Because price is range-based, not event-based.
-
-DAX resolves pricing based on selected date context.
-
-This avoids incorrect joins and preserves modeling correctness.
-
-5. Scaling Considerations
-
-The backend was designed with growth in mind.
-
-If scaled to enterprise volume, I would:
-
-Add indexing on:
-
-product_key
-
-plant_code
-
-effective_start_dt
-
-Partition fact tables by date
-
-Introduce connection pooling
-
-Introduce dbt for transformation versioning
-
-Move orchestration to Airflow or Prefect
-
-Introduce materialized views for BI-heavy workloads
-
-Add row-level security for plant isolation
-
-The schema does not require redesign to scale.
-
-It is intentionally future-proofed.
-
-6. Failure Scenarios & Operational Handling
-
-This is where systems prove themselves.
-
-Scenario 1: Duplicate File Upload
-
-Handled by:
-
-File hashing
-
-Ingestion state logging
-
-Skip logic
-
-Result:
-No duplicate pricing loads.
-
-Scenario 2: File Schema Change
-
-If CSV headers change:
-
-Validation fails
-
-Status logged as FAILED
-
-No partial insert
-
-Result:
-BI never sees corrupted price records.
-
-Scenario 3: Missing Plant or Product
-
-System behavior:
-
-Creates missing plant dimension row if needed
-
-Fails gracefully if canonical mapping cannot resolve
-
-Future improvement:
-
-Introduce staging validation layer before dimension auto-creation
-
-Scenario 4: Overlapping Price Ranges
-
-Current behavior:
-
-Prior is_current record is closed before inserting new record
-
-Prevents multiple active price rows
-
-Future enhancement:
-
-Add database constraint to enforce non-overlapping effective date windows
-
-7. BI Layer Discussion Points (For Interview)
-
-This implementation enables discussion around:
-
-Dimensional modeling strategy
-
-MDM simulation
-
-SCD handling
-
-Idempotent ETL
-
-Cloud-native ingestion
-
-Cost-efficient deployment
-
-Separation of concerns (API vs BI)
-
-Enterprise scaling roadmap
-
-The BI layer is intentionally not flashy.
-
-It is structurally correct.
-
-8. System Flow Diagram
 [ External Source (Google Drive) ]
-                ↓
+                                ↓
 [ Render Cron ETL Job ]
-                ↓
+                                ↓
 [ PostgreSQL (Star Schema) ]
-                ↓
+                                ↓
 [ PowerBI (Read-only Analytics Layer) ]
 
-Each layer has a clear responsibility.
+Each layer has a single responsibility and does not leak logic across boundaries.
 
-No layer leaks logic into another.
+## Why This Approach
 
-9. Why This Approach
+Enterprise BI should be predictable, auditable, historically accurate, and extensible without fragile dashboard transformations. This demo emphasizes reliability first and visualization second.
 
-I believe enterprise BI should:
+## If Expanded to Production
 
-Be predictable
+Next steps for production readiness:
 
-Be auditable
+- Data validation staging tables
+- CI/CD for ETL logic
+- dbt model layer
+- Airflow orchestration
+- Row-level security (RLS)
+- Snapshot inventory fact and yield variance fact
+- Materialized executive KPI views
+- Automated anomaly detection on pricing shifts
 
-Be historically accurate
+## Closing
 
-Be extensible without refactoring
+This demo simulates a multi-source ingestion platform with canonical SKU mapping, preserved pricing history, idempotent ETL, dimensional modeling, cloud-native deployment, and a BI layer that reads the validated star schema.
 
-Avoid fragile transformations inside dashboards
+(If you want, I can commit/push these changes and open a PR for review.)
 
-This demo reflects how I would build a production-grade protein analytics platform.
-
-Not just how I would build a report.
-
-10. If Expanded to Production
-
-Next evolution steps would include:
-
-Data validation staging tables
-
-CI/CD for ETL logic
-
-dbt model layer
-
-Airflow orchestration
-
-RLS for plant-level security
-
-Snapshot inventory fact
-
-Yield variance fact
-
-Materialized executive KPI views
-
-Automated anomaly detection on pricing shifts
-
-The foundation supports all of this.
-
-Closing Statement
-
-This demo simulates a Smithfield-style protein data platform with:
-
-Multi-source ingestion
-
-Canonical SKU mapping
-
-Historical pricing preservation
-
-Idempotent ETL
-
-Dimensional modeling
-
-Cloud-native deployment
-
-Enterprise-ready BI integration
-
-The emphasis is reliability first, visualization second. (See <attachments> above for file contents. You may not need to search or read the file again.)
