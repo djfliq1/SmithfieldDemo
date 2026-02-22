@@ -4,20 +4,18 @@ import csv
 import hashlib
 import os
 import re
-import sys
 from dataclasses import dataclass
 from datetime import datetime, date
 from decimal import Decimal, InvalidOperation
-from io import BytesIO, StringIO
-from typing import Iterable, Optional
+from io import StringIO
+from typing import Optional, Iterable
 
 import requests
-from sqlalchemy import text, select, update
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.db import build_engine, build_session_factory, load_db_config
-from app.models import Base, DimPlant, DimProduct, FactPriceByPlant
-
+from app.models import DimPlant, DimProduct, FactPriceByPlant
 
 # ----------------------------
 # Config / Constants
@@ -50,8 +48,7 @@ class PricingRow:
 
 
 # ----------------------------
-# Small helper: ingestion state table
-# (Created via SQL so you don't need to touch app/models.py for this demo.)
+# Ingestion state table
 # ----------------------------
 
 def ensure_ingestion_state_table(engine) -> None:
@@ -67,18 +64,19 @@ def ensure_ingestion_state_table(engine) -> None:
         rows_loaded INTEGER NOT NULL DEFAULT 0,
         error_message TEXT,
         ingested_at TIMESTAMP NOT NULL DEFAULT NOW(),
-        CONSTRAINT uq_etl_file UNIQUE (source_system, file_id)
+        CONSTRAINT uq_etl_file UNIQUE (source_system, file_id, source_location)
     );
     """
     with engine.begin() as conn:
         conn.execute(text(ddl))
 
 
-def already_ingested_success(session: Session, folder_url: str, file_id: str, file_hash: Optional[str]) -> bool:
-    """
-    If we have a SUCCESS record for this file_id, skip.
-    If file_hash is provided and differs, we will reprocess (treat as updated file).
-    """
+def already_ingested_success(
+    session: Session,
+    folder_url: str,
+    file_id: str,
+    file_hash: Optional[str],
+) -> bool:
     q = text(
         """
         SELECT status, file_hash
@@ -107,6 +105,7 @@ def already_ingested_success(session: Session, folder_url: str, file_id: str, fi
 
     prev_hash = row.get("file_hash")
     if file_hash and prev_hash and file_hash != prev_hash:
+        # file changed => reprocess
         return False
 
     return True
@@ -146,7 +145,7 @@ def write_ingestion_state(
 
 
 # ----------------------------
-# Google Drive (public folder scraping + download)
+# Google Drive (public folder scrape + download)
 # ----------------------------
 
 def fetch_folder_html(folder_url: str, timeout_sec: int = 30) -> str:
@@ -158,37 +157,24 @@ def fetch_folder_html(folder_url: str, timeout_sec: int = 30) -> str:
 def extract_drive_files(html: str, prefix: str, suffix: str) -> list[DriveFile]:
     """
     Hacky extraction:
-    - pulls file IDs from patterns like /file/d/<id> and id=<id>
-    - pulls file names from occurrences like "name":"<filename>" in embedded JSON
-    - pairs them by best-effort proximity; then filters by prefix/suffix
+    - tries to pair name + id via proximity search in embedded JSON
+    - falls back to matching names and ids in order if no pairs found
     """
-    # Find candidate file IDs
+    # Candidate IDs
     ids = set()
-
-    # /file/d/<id>
     for m in re.finditer(r"/file/d/([a-zA-Z0-9_-]{10,})", html):
         ids.add(m.group(1))
-
-    # id=<id>
     for m in re.finditer(r"[?&]id=([a-zA-Z0-9_-]{10,})", html):
         ids.add(m.group(1))
 
-    # Names often appear in JSON: "name":"pricing_by_plant_2026-03-01.csv"
-    # We'll collect all matching names.
-    names = []
-    for m in re.finditer(r'"name"\s*:\s*"([^"]+)"', html):
-        names.append(m.group(1))
-
-    # Filter names by prefix/suffix first
+    # Candidate names
+    names = [m.group(1) for m in re.finditer(r'"name"\s*:\s*"([^"]+)"', html)]
     target_names = [n for n in names if n.startswith(prefix) and n.endswith(suffix)]
 
-    # If we can't reliably pair names->ids, we still can ingest by ID with unknown name,
-    # BUT for demo we want names too. We'll do a best-effort pairing:
-    # Many pages embed "driveId":"<id>" near "name":"<filename>".
-    # We'll attempt to find (name, id) pairs via proximity patterns.
-    pairs = []
+    # Best effort pair by proximity: "name":"X"... "driveId":"Y"
+    pairs: list[DriveFile] = []
     pair_pattern = re.compile(
-        r'"name"\s*:\s*"(?P<name>[^"]+)"[^{}]{0,600}?"(driveId|id)"\s*:\s*"(?P<id>[a-zA-Z0-9_-]{10,})"',
+        r'"name"\s*:\s*"(?P<name>[^"]+)"[^{}]{0,900}?"(driveId|id)"\s*:\s*"(?P<id>[a-zA-Z0-9_-]{10,})"',
         re.DOTALL,
     )
     for m in pair_pattern.finditer(html):
@@ -197,9 +183,7 @@ def extract_drive_files(html: str, prefix: str, suffix: str) -> list[DriveFile]:
         if nm.startswith(prefix) and nm.endswith(suffix):
             pairs.append(DriveFile(file_id=fid, file_name=nm))
 
-    # If pairs found, prefer them
     if pairs:
-        # Deduplicate by file_id
         seen = set()
         out = []
         for p in pairs:
@@ -209,19 +193,11 @@ def extract_drive_files(html: str, prefix: str, suffix: str) -> list[DriveFile]:
             out.append(p)
         return out
 
-    # Fallback: if no pairs, create entries by IDs and use a synthetic name
-    # (still filtered by prefix/suffix is impossible without name).
-    # We'll use any discovered target_names to build placeholder name list,
-    # otherwise ingest nothing.
-    out = []
-    ids_list = list(ids)
+    # Fallback: zip ids with target_names (deterministic, but weak pairing)
     if not target_names:
-        return out
-
-    # Map first N names to first N ids (best effort) — still deterministic
-    for fid, nm in zip(ids_list, target_names):
-        out.append(DriveFile(file_id=fid, file_name=nm))
-    return out
+        return []
+    ids_list = list(ids)
+    return [DriveFile(file_id=fid, file_name=nm) for fid, nm in zip(ids_list, target_names)]
 
 
 def _download_uc(file_id: str, session: requests.Session, timeout_sec: int = 60) -> bytes:
@@ -234,22 +210,303 @@ def _download_uc(file_id: str, session: requests.Session, timeout_sec: int = 60)
     r = session.get(url, params=params, stream=True, timeout=timeout_sec)
     r.raise_for_status()
 
-    # If it's a confirmation page, extract confirm token and retry.
     content_type = (r.headers.get("content-type") or "").lower()
     if "text/html" in content_type:
         text_html = r.text
-        # token often like confirm=t or confirm=XXXX
+
         m = re.search(r"confirm=([0-9A-Za-z_]+)", text_html)
         if m:
             confirm = m.group(1)
-            r2 = session.get(url, params={"export": "download", "id": file_id, "confirm": confirm}, stream=True, timeout=timeout_sec)
+            r2 = session.get(
+                url,
+                params={"export": "download", "id": file_id, "confirm": confirm},
+                stream=True,
+                timeout=timeout_sec,
+            )
             r2.raise_for_status()
             return r2.content
 
-        # Alternate: look for form input name="confirm"
         m2 = re.search(r'name="confirm"\s+value="([^"]+)"', text_html)
         if m2:
             confirm = m2.group(1)
-            r3 = session.get(url, params={"export": "download", "id": file_id, "confirm": confirm}, stream=True, timeout=timeout_sec)
+            r3 = session.get(
+                url,
+                params={"export": "download", "id": file_id, "confirm": confirm},
+                stream=True,
+                timeout=timeout_sec,
+            )
             r3.raise_for_status()
-            return r3
+            return r3.content
+
+        # If it's HTML and no confirm found, it's likely a permissions/auth wall
+        raise RuntimeError("Drive download returned HTML (likely not public or blocked).")
+
+    return r.content
+
+
+def download_drive_file(file_id: str, timeout_sec: int = 60) -> bytes:
+    with requests.Session() as s:
+        return _download_uc(file_id=file_id, session=s, timeout_sec=timeout_sec)
+
+
+def sha256_hex(data: bytes) -> str:
+    h = hashlib.sha256()
+    h.update(data)
+    return h.hexdigest()
+
+
+# ----------------------------
+# CSV parsing
+# ----------------------------
+
+def _parse_date(s: str) -> date:
+    s = s.strip()
+    # Accept YYYY-MM-DD
+    return date.fromisoformat(s)
+
+
+def _parse_bool(s: str) -> bool:
+    s = (s or "").strip().lower()
+    return s in {"1", "true", "t", "yes", "y"}
+
+
+def parse_pricing_csv(csv_bytes: bytes) -> list[PricingRow]:
+    text_data = csv_bytes.decode("utf-8-sig")
+    reader = csv.DictReader(StringIO(text_data))
+
+    required = {
+        "plant_code",
+        "canonical_sku",
+        "price_per_lb",
+        "currency",
+        "effective_start_dt",
+        "effective_end_dt",
+        "is_current",
+    }
+    missing = required - set(reader.fieldnames or [])
+    if missing:
+        raise ValueError(f"CSV missing required headers: {sorted(missing)}")
+
+    rows: list[PricingRow] = []
+    for i, r in enumerate(reader, start=2):
+        try:
+            plant_code = (r["plant_code"] or "").strip()
+            canonical_sku = (r["canonical_sku"] or "").strip()
+            if not plant_code or not canonical_sku:
+                raise ValueError("plant_code and canonical_sku must be non-empty")
+
+            price = Decimal((r["price_per_lb"] or "").strip())
+            currency = (r["currency"] or "USD").strip().upper()
+
+            start_dt = _parse_date(r["effective_start_dt"])
+            end_raw = (r["effective_end_dt"] or "").strip()
+            end_dt = _parse_date(end_raw) if end_raw else None
+
+            is_current = _parse_bool(r["is_current"])
+
+            rows.append(
+                PricingRow(
+                    plant_code=plant_code,
+                    canonical_sku=canonical_sku,
+                    price_per_lb=price,
+                    currency=currency,
+                    effective_start_dt=start_dt,
+                    effective_end_dt=end_dt,
+                    is_current=is_current,
+                )
+            )
+        except (InvalidOperation, ValueError) as exc:
+            raise ValueError(f"Bad row at line {i}: {exc}") from exc
+
+    return rows
+
+
+# ----------------------------
+# DB upserts
+# ----------------------------
+
+def ensure_plants(session: Session, plant_codes: Iterable[str]) -> None:
+    """
+    Create plants if missing (simple demo defaults).
+    """
+    for code in sorted(set(pc.strip() for pc in plant_codes if pc and pc.strip())):
+        existing = session.get(DimPlant, code)
+        if existing:
+            continue
+        session.add(
+            DimPlant(
+                plant_code=code,
+                plant_name=f"Plant {code}",
+                state=None,
+                region=None,
+                is_active=True,
+            )
+        )
+
+
+def resolve_products(session: Session, skus: Iterable[str]) -> dict[str, DimProduct]:
+    """
+    Requires products already exist in dim_product (seeded by your app seed).
+    """
+    sku_list = sorted(set(s.strip() for s in skus if s and s.strip()))
+    if not sku_list:
+        return {}
+
+    q = (
+        session.query(DimProduct)
+        .filter(DimProduct.canonical_sku.in_(sku_list))
+        .all()
+    )
+    by_sku = {p.canonical_sku: p for p in q}
+
+    missing = [s for s in sku_list if s not in by_sku]
+    if missing:
+        raise ValueError(f"Unknown canonical_sku(s) not found in dim_product: {missing}")
+
+    return by_sku
+
+
+def upsert_pricing_rows(session: Session, rows: list[PricingRow]) -> int:
+    if not rows:
+        return 0
+
+    ensure_plants(session, [r.plant_code for r in rows])
+    products_by_sku = resolve_products(session, [r.canonical_sku for r in rows])
+
+    inserted = 0
+    for r in rows:
+        product = products_by_sku[r.canonical_sku]
+
+        # If new record is_current=True, turn off existing current rows for same product+plant
+        if r.is_current:
+            session.query(FactPriceByPlant).filter(
+                FactPriceByPlant.product_key == product.product_key,
+                FactPriceByPlant.plant_code == r.plant_code,
+                FactPriceByPlant.is_current.is_(True),
+            ).update({"is_current": False}, synchronize_session=False)
+
+        # Check if this exact (product_key, plant_code, effective_start_dt) already exists
+        existing = (
+            session.query(FactPriceByPlant)
+            .filter(
+                FactPriceByPlant.product_key == product.product_key,
+                FactPriceByPlant.plant_code == r.plant_code,
+                FactPriceByPlant.effective_start_dt == r.effective_start_dt,
+            )
+            .one_or_none()
+        )
+
+        if existing:
+            # Update fields (idempotent)
+            existing.price_per_lb = r.price_per_lb
+            existing.currency = r.currency
+            existing.effective_end_dt = r.effective_end_dt
+            existing.is_current = r.is_current
+        else:
+            session.add(
+                FactPriceByPlant(
+                    product_key=product.product_key,
+                    plant_code=r.plant_code,
+                    price_per_lb=r.price_per_lb,
+                    currency=r.currency,
+                    effective_start_dt=r.effective_start_dt,
+                    effective_end_dt=r.effective_end_dt,
+                    is_current=r.is_current,
+                )
+            )
+            inserted += 1
+
+    return inserted
+
+
+# ----------------------------
+# Orchestration
+# ----------------------------
+
+def ingest_folder_once(session: Session, folder_url: str, prefix: str, suffix: str) -> dict:
+    html = fetch_folder_html(folder_url)
+    files = extract_drive_files(html, prefix=prefix, suffix=suffix)
+
+    summary = {
+        "folder_url": folder_url,
+        "files_found": len(files),
+        "files_processed": 0,
+        "files_skipped": 0,
+        "rows_loaded": 0,
+        "failures": [],
+    }
+
+    for f in files:
+        try:
+            data = download_drive_file(f.file_id)
+            file_hash = sha256_hex(data)
+
+            if already_ingested_success(session, folder_url, f.file_id, file_hash):
+                summary["files_skipped"] += 1
+                continue
+
+            rows = parse_pricing_csv(data)
+            loaded = upsert_pricing_rows(session, rows)
+            write_ingestion_state(
+                session=session,
+                folder_url=folder_url,
+                file_id=f.file_id,
+                file_name=f.file_name,
+                status="SUCCESS",
+                rows_loaded=len(rows),
+                file_hash=file_hash,
+                error_message=None,
+            )
+            session.commit()
+
+            summary["files_processed"] += 1
+            summary["rows_loaded"] += len(rows)
+
+        except Exception as exc:
+            session.rollback()
+            # record failure state
+            try:
+                write_ingestion_state(
+                    session=session,
+                    folder_url=folder_url,
+                    file_id=f.file_id,
+                    file_name=f.file_name,
+                    status="FAILED",
+                    rows_loaded=0,
+                    file_hash=None,
+                    error_message=str(exc)[:2000],
+                )
+                session.commit()
+            except Exception:
+                session.rollback()
+
+            summary["failures"].append({"file_name": f.file_name, "file_id": f.file_id, "error": str(exc)})
+
+    return summary
+
+
+def main() -> None:
+    folder_url = os.getenv("GDRIVE_FOLDER_URL", "").strip()
+    if not folder_url:
+        raise SystemExit("Missing env var GDRIVE_FOLDER_URL")
+
+    prefix = os.getenv("GDRIVE_FILE_PREFIX", DEFAULT_PREFIX)
+    suffix = os.getenv("GDRIVE_FILE_SUFFIX", DEFAULT_SUFFIX)
+
+    # DB setup (same style as your API)
+    config = load_db_config()
+    engine = build_engine(config)
+    ensure_ingestion_state_table(engine)
+    session_factory = build_session_factory(engine)
+
+    with session_factory() as session:
+        summary = ingest_folder_once(session, folder_url, prefix, suffix)
+
+    print("CRON SUMMARY:", summary)
+    # For demo: always exit 0 so Render marks run as successful even if some files fail
+    # (You’ll still see failures in summary/logs)
+    return
+
+
+if __name__ == "__main__":
+    main()
