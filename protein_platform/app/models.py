@@ -156,6 +156,5 @@ class RawProductionEvent(Base):
 
     __table_args__ = (
         UniqueConstraint("source_system", "source_event_id", name="uq_raw_src_event"),
-        Index("ix_raw_received_at", "received_at"),
->>>>>>> main
+        Index("ix_raw_received_at", "received_at")
     )
