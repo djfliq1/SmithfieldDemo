@@ -5,10 +5,10 @@ import hashlib
 import os
 import re
 from dataclasses import dataclass
-from datetime import datetime, date
+from datetime import date
 from decimal import Decimal, InvalidOperation
 from io import StringIO
-from typing import Optional, Iterable
+from typing import Iterable, Optional
 
 import requests
 from sqlalchemy import text
@@ -20,6 +20,9 @@ from app.models import DimPlant, DimProduct, FactPriceByPlant
 # ----------------------------
 # Config / Constants
 # ----------------------------
+
+# ✅ Your folder to watch (default). Env var can override if you want.
+DEFAULT_FOLDER_URL = "https://drive.google.com/drive/folders/1h4lc-yx70G21Nnmo6CSOAMdawmLg8dfZ?usp=drive_link"
 
 DEFAULT_PREFIX = "pricing_by_plant_"
 DEFAULT_SUFFIX = ".csv"
@@ -148,6 +151,20 @@ def write_ingestion_state(
 # Google Drive (public folder scrape + download)
 # ----------------------------
 
+def normalize_folder_url(url: str) -> str:
+    """
+    Normalize for consistent state keys. Keep folder id, drop extra tracking params if present.
+    """
+    url = (url or "").strip()
+    if not url:
+        return url
+    # Keep base + folder id portion
+    m = re.search(r"(https?://drive\.google\.com/drive/folders/[a-zA-Z0-9_-]+)", url)
+    if m:
+        return m.group(1)
+    return url
+
+
 def fetch_folder_html(folder_url: str, timeout_sec: int = 30) -> str:
     resp = requests.get(folder_url, timeout=timeout_sec)
     resp.raise_for_status()
@@ -159,22 +176,35 @@ def extract_drive_files(html: str, prefix: str, suffix: str) -> list[DriveFile]:
     Hacky extraction:
     - tries to pair name + id via proximity search in embedded JSON
     - falls back to matching names and ids in order if no pairs found
+
+    Notes:
+    Google Drive folder pages are JS-heavy. This is best-effort for a demo.
     """
-    # Candidate IDs
+    # Candidate IDs (multiple patterns)
     ids = set()
+
+    # /file/d/<id>
     for m in re.finditer(r"/file/d/([a-zA-Z0-9_-]{10,})", html):
         ids.add(m.group(1))
+
+    # ?id=<id>
     for m in re.finditer(r"[?&]id=([a-zA-Z0-9_-]{10,})", html):
         ids.add(m.group(1))
 
-    # Candidate names
+    # JSON-ish: "driveId":"<id>" or "id":"<id>"
+    for m in re.finditer(r'"driveId"\s*:\s*"([a-zA-Z0-9_-]{10,})"', html):
+        ids.add(m.group(1))
+    for m in re.finditer(r'"id"\s*:\s*"([a-zA-Z0-9_-]{10,})"', html):
+        ids.add(m.group(1))
+
+    # Candidate names: "name":"pricing_by_plant_2026-03-01.csv"
     names = [m.group(1) for m in re.finditer(r'"name"\s*:\s*"([^"]+)"', html)]
     target_names = [n for n in names if n.startswith(prefix) and n.endswith(suffix)]
 
     # Best effort pair by proximity: "name":"X"... "driveId":"Y"
     pairs: list[DriveFile] = []
     pair_pattern = re.compile(
-        r'"name"\s*:\s*"(?P<name>[^"]+)"[^{}]{0,900}?"(driveId|id)"\s*:\s*"(?P<id>[a-zA-Z0-9_-]{10,})"',
+        r'"name"\s*:\s*"(?P<name>[^"]+)"[^{}]{0,1200}?"(driveId|id)"\s*:\s*"(?P<id>[a-zA-Z0-9_-]{10,})"',
         re.DOTALL,
     )
     for m in pair_pattern.finditer(html):
@@ -185,7 +215,7 @@ def extract_drive_files(html: str, prefix: str, suffix: str) -> list[DriveFile]:
 
     if pairs:
         seen = set()
-        out = []
+        out: list[DriveFile] = []
         for p in pairs:
             if p.file_id in seen:
                 continue
@@ -194,9 +224,10 @@ def extract_drive_files(html: str, prefix: str, suffix: str) -> list[DriveFile]:
         return out
 
     # Fallback: zip ids with target_names (deterministic, but weak pairing)
-    if not target_names:
+    if not target_names or not ids:
         return []
-    ids_list = list(ids)
+
+    ids_list = sorted(ids)  # deterministic
     return [DriveFile(file_id=fid, file_name=nm) for fid, nm in zip(ids_list, target_names)]
 
 
@@ -261,7 +292,6 @@ def sha256_hex(data: bytes) -> str:
 
 def _parse_date(s: str) -> date:
     s = s.strip()
-    # Accept YYYY-MM-DD
     return date.fromisoformat(s)
 
 
@@ -446,7 +476,8 @@ def ingest_folder_once(session: Session, folder_url: str, prefix: str, suffix: s
                 continue
 
             rows = parse_pricing_csv(data)
-            loaded = upsert_pricing_rows(session, rows)
+            _ = upsert_pricing_rows(session, rows)
+
             write_ingestion_state(
                 session=session,
                 folder_url=folder_url,
@@ -486,9 +517,10 @@ def ingest_folder_once(session: Session, folder_url: str, prefix: str, suffix: s
 
 
 def main() -> None:
-    folder_url = os.getenv("GDRIVE_FOLDER_URL", "").strip()
+    # ✅ Uses your folder by default (no env var required), but env var still overrides if set.
+    folder_url = normalize_folder_url(os.getenv("GDRIVE_FOLDER_URL", DEFAULT_FOLDER_URL))
     if not folder_url:
-        raise SystemExit("Missing env var GDRIVE_FOLDER_URL")
+        raise SystemExit("Missing folder URL (GDRIVE_FOLDER_URL or DEFAULT_FOLDER_URL)")
 
     prefix = os.getenv("GDRIVE_FILE_PREFIX", DEFAULT_PREFIX)
     suffix = os.getenv("GDRIVE_FILE_SUFFIX", DEFAULT_SUFFIX)
@@ -503,8 +535,6 @@ def main() -> None:
         summary = ingest_folder_once(session, folder_url, prefix, suffix)
 
     print("CRON SUMMARY:", summary)
-    # For demo: always exit 0 so Render marks run as successful even if some files fail
-    # (You’ll still see failures in summary/logs)
     return
 
 
