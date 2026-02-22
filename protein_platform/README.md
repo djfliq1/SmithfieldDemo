@@ -147,6 +147,99 @@ protein_platform/
 
 ---
 
+## App internals (`app/`)
+
+This project is organized so the `app/` package contains the runtime logic for ingestion, mapping, and persistence. The following explains each major module, the runtime ingestion flow, and small developer snippets to interact with the code.
+
+### Key modules
+
+- `app/db.py` — SQLAlchemy engine, async/sync session factory and helpers. Use `DATABASE_URL` env var to change the backend. The default demo uses SQLite (`sqlite:///./protein_dw.sqlite`).
+- `app/models.py` — SQLAlchemy 2.0 ORM models for `dim_product`, `dim_plant`, `map_product_source_to_canonical`, `fact_production`, and `fact_price_by_plant`.
+- `app/contracts.py` — Pydantic schemas used by FastAPI and the orchestrator (`RawProductionEvent`, `CanonicalProductionEvent`, `IngestResponse`).
+- `app/registry.py` — Plugin registry that tracks available `SourcePlugin` implementations and provides lookup by `source_system`.
+- `app/mapping_repo.py` — Canonical SKU resolution logic. Returns `product_key` for source SKUs and optionally auto-creates `dim_product`/`dim_plant` rows when safe.
+- `app/orchestration.py` — Central orchestrator that:
+  1. Validates incoming payloads
+  2. Resolves correct plugin from `registry`
+  3. Invokes plugin's `transform_payload` to canonicalize fields
+  4. Normalizes UOM to LB via UOM helpers
+  5. Writes idempotent facts using `loaders.fact_loader`
+- `app/seed.py` — Idempotent seeder used to populate canonical products and mappings for local demos and tests.
+- `app/loaders/fact_loader.py` — Idempotent fact writer that hashes canonical events to prevent duplicate inserts; records ingestion state in `etl_file_ingestion_state`-like table.
+- `app/plugins/*` — Source plugin implementations. Each plugin implements the `SourcePlugin` abstract base in `app/plugins/base.py`.
+
+### Ingest flow (high-level)
+
+1. FastAPI `POST /ingest/production` receives any JSON payload containing `source_system`.
+2. The `orchestrator` asks `registry` for the plugin class matching `source_system`.
+3. Plugin's `transform_payload(payload: dict) -> dict` returns a normalized dict with canonical keys:
+
+```py
+{
+  "source_system": "PORK_ERP",
+  "source_event_id": "P-0001",
+  "event_ts": datetime(...),
+  "plant_code": "VA01",
+  "source_item_id": "ITM-100221",
+  "source_item_desc": "LOIN BNLS",
+  "qty": 100.0,
+  "uom": "LB",
+  "scrap_qty": 2.5,
+}
+```
+
+4. Orchestrator resolves `product_key` via `mapping_repo` and converts quantities to LB.
+5. `loaders.fact_loader` checks the event hash against previous ingestions; inserts `fact_production` if new, else returns `duplicate` response.
+6. The API returns an `IngestResponse` indicating `inserted` or `duplicate`.
+
+### Developer snippets
+
+Registering a plugin (runtime dynamic registration):
+
+```py
+from app.registry import registry
+from app.plugins.pork_erp import PorkErpPlugin
+
+registry.register(PorkErpPlugin())
+```
+
+Resolving a canonical product (mapping_repo example):
+
+```py
+from app.mapping_repo import MappingRepo
+from app.db import Session
+
+with Session() as session:
+    repo = MappingRepo(session)
+    product_key = repo.resolve(source_system='PORK_ERP', source_item_id='ITM-100221')
+```
+
+Writing a canonical event via the orchestrator:
+
+```py
+from app.orchestration import Orchestrator
+from app.db import Session
+
+payload = {...}  # raw plugin input
+with Session() as session:
+    orch = Orchestrator(session)
+    resp = orch.ingest(payload)
+    print(resp)
+```
+
+### Tests and fixtures
+
+The `tests/conftest.py` exposes an in-memory SQLite engine/session and idempotent seeding used by unit tests and end-to-end tests. Tests exercise plugin registration, UOM conversion, mapping resolution, and end-to-end ingestion (`test_ingest_e2e.py`).
+
+### Operational notes
+
+- Idempotency: events are hashed (SHA256) before insertion; duplicates are detected and safely skipped.
+- Pricing: `fact_price_by_plant` models SCD Type 2 using `effective_start_dt`, `effective_end_dt`, and `is_current` flags.
+- Scaling: for production, swap `DATABASE_URL` to Postgres, add indexing and partitioning, and move orchestration to a task scheduler (Airflow/Prefect).
+
+---
+
+
 ## How to Add a New Source Plugin
 
 1. **Create a new plugin file** in `app/plugins/`, e.g. `app/plugins/lamb_tms.py`:
