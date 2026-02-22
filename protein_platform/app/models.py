@@ -37,6 +37,26 @@ class DimProduct(Base):
         back_populates="product"
     )
     productions: Mapped[list["FactProduction"]] = relationship(back_populates="product")
+    prices: Mapped[list["FactPriceByPlant"]] = relationship(back_populates="product")
+
+
+class DimPlant(Base):
+    __tablename__ = "dim_plant"
+
+    plant_code: Mapped[str] = mapped_column(String(20), primary_key=True)
+    plant_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    state: Mapped[str | None] = mapped_column(String(2), nullable=True)
+    region: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=func.now(), onupdate=func.now())
+
+    prices: Mapped[list["FactPriceByPlant"]] = relationship(back_populates="plant")
+
+    __table_args__ = (
+        Index("ix_dim_plant_region", "region"),
+        Index("ix_dim_plant_state", "state"),
+    )
 
 
 class MapProductSourceToCanonical(Base):
@@ -96,6 +116,34 @@ class FactProduction(Base):
     )
 
 
+<<<<<<< copilot/create-integration-ingestion-platform
+class FactPriceByPlant(Base):
+    __tablename__ = "fact_price_by_plant"
+
+    price_key: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    product_key: Mapped[int] = mapped_column(
+        Integer, ForeignKey("dim_product.product_key"), nullable=False
+    )
+    plant_code: Mapped[str] = mapped_column(
+        String(20), ForeignKey("dim_plant.plant_code"), nullable=False
+    )
+    price_per_lb: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False, default="USD")
+    effective_start_dt: Mapped[date] = mapped_column(Date, nullable=False)
+    effective_end_dt: Mapped[date | None] = mapped_column(Date, nullable=True)
+    is_current: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=func.now())
+
+    product: Mapped["DimProduct"] = relationship(back_populates="prices")
+    plant: Mapped["DimPlant"] = relationship(back_populates="prices")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "product_key", "plant_code", "effective_start_dt", name="uq_price_prod_plant_start"
+        ),
+        Index("ix_price_plant_current", "plant_code", "is_current"),
+        Index("ix_price_product_current", "product_key", "is_current"),
+=======
 class RawProductionEvent(Base):
     __tablename__ = "raw_production_event"
 
@@ -110,4 +158,5 @@ class RawProductionEvent(Base):
     __table_args__ = (
         UniqueConstraint("source_system", "source_event_id", name="uq_raw_src_event"),
         Index("ix_raw_received_at", "received_at"),
+>>>>>>> main
     )
