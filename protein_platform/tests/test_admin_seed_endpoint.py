@@ -1,11 +1,23 @@
 import os
 from fastapi.testclient import TestClient
-from app.main import app
+import importlib
+import sys
+
+
+def _import_app_after_env():
+    # ensure app.main is imported after env vars are set
+    if "app.main" in sys.modules:
+        del sys.modules["app.main"]
+    mod = importlib.import_module("app.main")
+    return mod.app
 
 
 def test_admin_seed_ok(monkeypatch):
     token = "test-admin-token"
     monkeypatch.setenv("ADMIN_TOKEN", token)
+    # use isolated in-memory DB for this test
+    monkeypatch.setenv("DATABASE_URL", "sqlite:///:memory:")
+    app = _import_app_after_env()
     client = TestClient(app)
     headers = {"X-Admin-Token": token}
     resp = client.post("/admin/seed", headers=headers)
@@ -21,6 +33,8 @@ def test_admin_seed_ok(monkeypatch):
 def test_admin_seed_unauthorized(monkeypatch):
     # ensure ADMIN_TOKEN is set but header omitted
     monkeypatch.setenv("ADMIN_TOKEN", "abc")
+    # ensure app imported after env set
+    app = _import_app_after_env()
     client = TestClient(app)
     resp = client.post("/admin/seed")
     assert resp.status_code == 401
