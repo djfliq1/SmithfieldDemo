@@ -427,6 +427,8 @@ def ingest_folder_once(session: Session, folder_url: str, prefix: str, suffix: s
     
     files = fetch_manifest_files()
 
+    print(f"[cron] manifest files: {[f.file_name for f in files]}")
+
     summary = {
         "folder_url": folder_url,
         "files_found": len(files),
