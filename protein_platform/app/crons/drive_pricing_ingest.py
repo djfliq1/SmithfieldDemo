@@ -453,9 +453,34 @@ def upsert_pricing_rows(session: Session, rows: list[PricingRow]) -> int:
 # Orchestration
 # ----------------------------
 
+def fetch_manifest_files() -> list[DriveFile]:
+    """
+    Manifest-driven file discovery.
+    Reads pricing_manifest.csv from Drive and returns DriveFile objects.
+    """
+    manifest_id = os.getenv("GDRIVE_MANIFEST_FILE_ID")
+    if not manifest_id:
+        raise SystemExit("Missing GDRIVE_MANIFEST_FILE_ID (required for manifest-driven ingestion)")
+
+    url = f"https://drive.google.com/uc?export=download&id={manifest_id}"
+    resp = requests.get(url, timeout=30)
+    resp.raise_for_status()
+
+    reader = csv.DictReader(StringIO(resp.text))
+    files: list[DriveFile] = []
+
+    for row in reader:
+        file_name = (row.get("file_name") or "").strip()
+        file_id = (row.get("file_id") or "").strip()
+        if not file_name or not file_id:
+            continue
+        files.append(DriveFile(file_id=file_id, file_name=file_name))
+
+    return files
+
+
 def ingest_folder_once(session: Session, folder_url: str, prefix: str, suffix: str) -> dict:
-    html = fetch_folder_html(folder_url)
-    files = extract_drive_files(html, prefix=prefix, suffix=suffix)
+    files = fetch_manifest_files()
 
     summary = {
         "folder_url": folder_url,
