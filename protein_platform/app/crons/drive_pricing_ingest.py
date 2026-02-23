@@ -165,64 +165,6 @@ def normalize_folder_url(url: str) -> str:
     return url
 
 
-def fetch_folder_html(folder_url: str, timeout_sec: int = 30) -> str:
-    resp = requests.get(folder_url, timeout=timeout_sec)
-    resp.raise_for_status()
-    return resp.text
-
-
-def extract_drive_files(html: str, prefix: str, suffix: str) -> list[DriveFile]:
-    """
-    Hacky extraction:
-    - tries to pair name + id via proximity search in embedded JSON
-    - falls back to matching names and ids in order if no pairs found
-
-    Notes:
-    Google Drive folder pages are JS-heavy. This is best-effort for a demo.
-    """
-    # Candidate IDs (multiple patterns)
-    ids = set()
-
-    # /file/d/<id>
-    for m in re.finditer(r"/file/d/([a-zA-Z0-9_-]{10,})", html):
-        ids.add(m.group(1))
-
-    # ?id=<id>
-    for m in re.finditer(r"[?&]id=([a-zA-Z0-9_-]{10,})", html):
-        ids.add(m.group(1))
-
-    # JSON-ish: "driveId":"<id>" or "id":"<id>"
-    for m in re.finditer(r'"driveId"\s*:\s*"([a-zA-Z0-9_-]{10,})"', html):
-        ids.add(m.group(1))
-    for m in re.finditer(r'"id"\s*:\s*"([a-zA-Z0-9_-]{10,})"', html):
-        ids.add(m.group(1))
-
-    # Candidate names: "name":"pricing_by_plant_2026-03-01.csv"
-    names = [m.group(1) for m in re.finditer(r'"name"\s*:\s*"([^"]+)"', html)]
-    target_names = [n for n in names if n.startswith(prefix) and n.endswith(suffix)]
-
-    # Best effort pair by proximity: "name":"X"... "driveId":"Y"
-    pairs: list[DriveFile] = []
-    pair_pattern = re.compile(
-        r'"name"\s*:\s*"(?P<name>[^"]+)"[^{}]{0,1200}?"(driveId|id)"\s*:\s*"(?P<id>[a-zA-Z0-9_-]{10,})"',
-        re.DOTALL,
-    )
-    for m in pair_pattern.finditer(html):
-        nm = m.group("name")
-        fid = m.group("id")
-        if nm.startswith(prefix) and nm.endswith(suffix):
-            pairs.append(DriveFile(file_id=fid, file_name=nm))
-
-    if pairs:
-        seen = set()
-        out: list[DriveFile] = []
-        for p in pairs:
-            if p.file_id in seen:
-                continue
-            seen.add(p.file_id)
-            out.append(p)
-        return out
-
     # Fallback: zip ids with target_names (deterministic, but weak pairing)
     if not target_names or not ids:
         return []
