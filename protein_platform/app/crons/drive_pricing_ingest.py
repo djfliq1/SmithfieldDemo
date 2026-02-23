@@ -422,6 +422,9 @@ def fetch_manifest_files() -> list[DriveFile]:
 
 
 def ingest_folder_once(session: Session, folder_url: str, prefix: str, suffix: str) -> dict:
+
+    print(f"[cron] discovery=manifest manifest_id={os.getenv('GDRIVE_MANIFEST_FILE_ID')}")
+    
     files = fetch_manifest_files()
 
     summary = {
